@@ -67,7 +67,11 @@ WS_PARSING_STATE handle_rx_msg(rx_ws_message_t *msg, const uint8_t c) {
             msg->payload_len = c & 0x7f;
             msg->is_masked = c & 0x80;
             msg->payload_cur_pos = 0;
-            if (msg->payload_len == 126) {
+            printf("WS_PARSING_LEN len=%lu\n", msg->payload_len);
+            if (msg->payload_len == 0) {
+                msg->state = WS_PARSING_DONE;
+            }
+            else if (msg->payload_len == 126) {
                 msg->state = WS_PARSING_LEN126_1;
             }
             else if (msg->payload_len == 127) {
@@ -161,17 +165,20 @@ void handle_socket_sigio() {
     printf("socket.recv returned %d\n", r); // 0 would be fine, would block would be fine too
     if (r > 0) {
         for (int ix = 0; ix < r; ix++) {
-            printf("Handling char, c=%02x, state=%d\n", rx_buffer[ix], curr_msg.state);
             WS_PARSING_STATE s = handle_rx_msg(&curr_msg, rx_buffer[ix]);
-            printf("Handling char done, c=%02x, state=%d\n", rx_buffer[ix], curr_msg.state);
             if (s == WS_PARSING_DONE) {
                 printf("Websocket msg, opcode=%u, len=%lu: ", curr_msg.opcode, curr_msg.payload_len);
                 for (size_t jx = 0; jx < curr_msg.payload_len; jx++) {
                     printf("%c", curr_msg.payload[jx]);
                 }
                 printf("\n");
+                curr_msg.state = WS_PARSING_NONE;
+
+                // send pong back if server asks for it
+                if (curr_msg.opcode == WS_PING_FRAME) {
+                    queue.call(&send, WS_PONG_FRAME, nullptr, 0);
+                }
             }
-            curr_msg.state = WS_PARSING_NONE;
         }
 
     }
