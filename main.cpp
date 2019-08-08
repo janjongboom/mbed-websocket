@@ -150,6 +150,8 @@ WS_PARSING_STATE handle_rx_msg(rx_ws_message_t *msg, const uint8_t c) {
     return msg->state;
 }
 
+static rx_ws_message_t curr_msg;
+
 void handle_socket_sigio() {
     static uint8_t rx_buffer[1024];
 
@@ -158,7 +160,20 @@ void handle_socket_sigio() {
     nsapi_size_or_error_t r = socket.recv(rx_buffer, sizeof(rx_buffer));
     printf("socket.recv returned %d\n", r); // 0 would be fine, would block would be fine too
     if (r > 0) {
-        // handle_rx_msg(rx_buffer, r);
+        for (int ix = 0; ix < r; ix++) {
+            printf("Handling char, c=%02x, state=%d\n", rx_buffer[ix], curr_msg.state);
+            WS_PARSING_STATE s = handle_rx_msg(&curr_msg, rx_buffer[ix]);
+            printf("Handling char done, c=%02x, state=%d\n", rx_buffer[ix], curr_msg.state);
+            if (s == WS_PARSING_DONE) {
+                printf("Websocket msg, opcode=%u, len=%lu: ", curr_msg.opcode, curr_msg.payload_len);
+                for (size_t jx = 0; jx < curr_msg.payload_len; jx++) {
+                    printf("%c", curr_msg.payload[jx]);
+                }
+                printf("\n");
+            }
+            curr_msg.state = WS_PARSING_NONE;
+        }
+
     }
 }
 
@@ -220,24 +235,7 @@ void fall() {
 }
 
 int main() {
-    const uint8_t buffer[] = { 0x81, 0x0b, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x77, 0x6f, 0x72, 0x6c, 0x64 };
-
-    rx_ws_message_t msg;
-    memset((void*)&msg, 0, sizeof(rx_ws_message_t));
-
-    for (size_t ix = 0; ix < sizeof(buffer); ix++) {
-        WS_PARSING_STATE s = handle_rx_msg(&msg, buffer[ix]);
-        if (s == WS_PARSING_DONE) {
-            printf("opcode=%u, payload_len=%lu: ", msg.opcode, msg.payload_len);
-            for (size_t ix = 0; ix < msg.payload_len; ix++) {
-                printf("%c", msg.payload[ix]);
-            }
-            printf("\n");
-        }
-    }
-
-    return 1;
-
+    curr_msg.state = WS_PARSING_NONE;
 
     WiFiInterface *network = WiFiInterface::get_default_instance();
     if (!network) {
