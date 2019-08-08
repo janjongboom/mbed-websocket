@@ -1,0 +1,6 @@
+{
+    "ignore": [
+        "./mbed-http",
+        "./wifi-ism43362"
+    ]
+}
