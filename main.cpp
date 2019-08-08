@@ -13,7 +13,142 @@ typedef enum {
     WS_PONG_FRAME = 10
 } WS_OPCODE;
 
-int send(const uint8_t *data, size_t data_size);
+typedef enum {
+    WS_PARSING_NONE = 0,
+    WS_PARSING_OPCODE = 1,
+    WS_PARSING_LEN = 2,
+    WS_PARSING_LEN126_1 = 3,
+    WS_PARSING_LEN126_2 = 4,
+    WS_PARSING_LEN127_1 = 5,
+    WS_PARSING_LEN127_2 = 6,
+    WS_PARSING_LEN127_3 = 7,
+    WS_PARSING_LEN127_4 = 8,
+    WS_PARSING_LEN127_5 = 9,
+    WS_PARSING_LEN127_6 = 10,
+    WS_PARSING_LEN127_7 = 11,
+    WS_PARSING_LEN127_8 = 12,
+    WB_PARSING_MASK_CHECK = 13,
+    WB_PARSING_MASK_1 = 14,
+    WB_PARSING_MASK_2 = 15,
+    WB_PARSING_MASK_3 = 16,
+    WB_PARSING_MASK_4 = 17,
+    WS_PARSING_PAYLOAD = 18,
+    WS_PARSING_DONE = 19
+} WS_PARSING_STATE;
+
+typedef struct {
+    WS_PARSING_STATE state;
+    bool fin;
+    WS_OPCODE opcode;
+    bool is_masked;
+    char mask[4];
+    uint32_t payload_len;
+    uint32_t payload_cur_pos;
+    uint8_t *payload;
+} rx_ws_message_t;
+
+int send(WS_OPCODE op_code, const uint8_t *data, size_t data_size);
+
+WS_PARSING_STATE handle_rx_msg(rx_ws_message_t *msg, const uint8_t c) {
+    printf("handle_rx_msg state=%d\n", msg->state);
+
+    int i;
+
+    switch (msg->state) {
+        case WS_PARSING_NONE:
+        case WS_PARSING_OPCODE:
+            memset(msg->mask, 0, 4);    // empty mask
+            msg->fin = c >> 7 & 0x1;    // first bit indicates the fin flag
+            msg->opcode = (WS_OPCODE)(c & 0b1111);   // last four bits indicate the opcode
+            msg->state = WS_PARSING_LEN;
+            break;
+
+        case WS_PARSING_LEN:
+            msg->payload_len = c & 0x7f;
+            msg->is_masked = c & 0x80;
+            msg->payload_cur_pos = 0;
+            if (msg->payload_len == 126) {
+                msg->state = WS_PARSING_LEN126_1;
+            }
+            else if (msg->payload_len == 127) {
+                msg->payload_len = 0;
+                msg->state = WS_PARSING_LEN127_1;
+            }
+            else {
+                msg->payload = (uint8_t*)malloc(msg->payload_len);
+                msg->state = WB_PARSING_MASK_CHECK;
+            }
+            break;
+
+        case WS_PARSING_LEN126_1:
+            msg->payload_len = c << 8;
+            msg->state = WS_PARSING_LEN126_2;
+            break;
+
+        case WS_PARSING_LEN126_2:
+            msg->payload_len += c;
+            msg->state = WB_PARSING_MASK_CHECK;
+            break;
+
+        case WS_PARSING_LEN127_1:
+        case WS_PARSING_LEN127_2:
+        case WS_PARSING_LEN127_3:
+        case WS_PARSING_LEN127_4:
+        case WS_PARSING_LEN127_5:
+        case WS_PARSING_LEN127_6:
+        case WS_PARSING_LEN127_7:
+        case WS_PARSING_LEN127_8:
+            i = msg->state - WS_PARSING_LEN127_1;
+            msg->payload_len += (c << (7 - i) * 8);
+            msg->state = (WS_PARSING_STATE)((int)msg->state + 1);
+            break;
+
+        case WB_PARSING_MASK_CHECK:
+            if (!msg->is_masked) {
+                msg->payload_cur_pos = 0;
+                msg->state = WS_PARSING_PAYLOAD;
+            }
+            else {
+                msg->state = WB_PARSING_MASK_1;
+            }
+            return handle_rx_msg(msg, c);
+
+        case WB_PARSING_MASK_1:
+            msg->mask[0] = c;
+            msg->state = WB_PARSING_MASK_2;
+            break;
+
+        case WB_PARSING_MASK_2:
+            msg->mask[1] = c;
+            msg->state = WB_PARSING_MASK_3;
+            break;
+
+        case WB_PARSING_MASK_3:
+            msg->mask[2] = c;
+            msg->state = WB_PARSING_MASK_4;
+            break;
+
+        case WB_PARSING_MASK_4:
+            msg->mask[3] = c;
+            msg->payload_cur_pos = 0;
+            msg->state = WS_PARSING_PAYLOAD;
+            break;
+
+        case WS_PARSING_PAYLOAD:
+            msg->payload[msg->payload_cur_pos] = c ^ msg->mask[msg->payload_cur_pos % 4];
+            if (msg->payload_cur_pos + 1 == msg->payload_len) {
+                msg->state = WS_PARSING_DONE;
+            }
+            msg->payload_cur_pos++;
+            break;
+
+        case WS_PARSING_DONE:
+            break;
+    }
+
+    printf("handle_rx_msg now state=%d\n", msg->state);
+    return msg->state;
+}
 
 void handle_socket_sigio() {
     static uint8_t rx_buffer[1024];
@@ -23,48 +158,7 @@ void handle_socket_sigio() {
     nsapi_size_or_error_t r = socket.recv(rx_buffer, sizeof(rx_buffer));
     printf("socket.recv returned %d\n", r); // 0 would be fine, would block would be fine too
     if (r > 0) {
-        bool fin = rx_buffer[0] >> 7 & 0x1;     // first bit indicates the fin flag
-        uint8_t opcode = rx_buffer[0] & 0b1111; // last four bits indicate the opcode
-        char mask[4] = {0, 0, 0, 0};
-
-        printf("Raw: ");
-        for (size_t ix = 0; ix < r; ix++) {
-            printf("%02x ", rx_buffer[ix]);
-        }
-        printf("\n");
-
-        int c = 1;
-
-        uint32_t ws_length = rx_buffer[c] & 0x7f;
-        bool is_masked = rx_buffer[c] & 0x80;
-        if (ws_length == 126) {
-            c++;
-            ws_length = rx_buffer[c] << 8;
-            c++;
-            ws_length += rx_buffer[c];
-        } else if (ws_length == 127) {
-            ws_length = 0;
-            for (int i = 0; i < 8; i++) {
-                c++;
-                ws_length += (rx_buffer[c] << (7-i)*8);
-            }
-        }
-
-        printf("Parsed length: %lu\n", ws_length);
-
-        printf("Payload: ");
-        // mask stuff.. if needed?
-        for (int i = c; i < c + ws_length; i++) {
-            rx_buffer[i] = rx_buffer[i] ^ mask[i % 4];
-            printf("%02x ", rx_buffer[i]);
-        }
-        printf("\n");
-
-
-        // schedule pong frame
-        if (opcode == WS_PING_FRAME) {
-            queue.call(&send, WS_PONG_FRAME, nullptr, 0);
-        }
+        // handle_rx_msg(rx_buffer, r);
     }
 }
 
@@ -115,6 +209,8 @@ int send(WS_OPCODE opcode, const uint8_t *data, size_t data_size) {
 
     nsapi_size_or_error_t r = socket.send((const uint8_t*)ws_buffer, idx);
     printf("send returned %d\n", r);
+
+    return 0;
 }
 
 
@@ -124,6 +220,25 @@ void fall() {
 }
 
 int main() {
+    const uint8_t buffer[] = { 0x81, 0x0b, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x77, 0x6f, 0x72, 0x6c, 0x64 };
+
+    rx_ws_message_t msg;
+    memset((void*)&msg, 0, sizeof(rx_ws_message_t));
+
+    for (size_t ix = 0; ix < sizeof(buffer); ix++) {
+        WS_PARSING_STATE s = handle_rx_msg(&msg, buffer[ix]);
+        if (s == WS_PARSING_DONE) {
+            printf("opcode=%u, payload_len=%lu: ", msg.opcode, msg.payload_len);
+            for (size_t ix = 0; ix < msg.payload_len; ix++) {
+                printf("%c", msg.payload[ix]);
+            }
+            printf("\n");
+        }
+    }
+
+    return 1;
+
+
     WiFiInterface *network = WiFiInterface::get_default_instance();
     if (!network) {
         printf("No network\n");
@@ -197,6 +312,8 @@ int main() {
     btn.fall(queue.event(&fall));
 
     printf("init done\n");
+
+    queue.call_every(10000, &send, WS_PING_FRAME, nullptr, 0);
 
     queue.dispatch_forever();
 }
