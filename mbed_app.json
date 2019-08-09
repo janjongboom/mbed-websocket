@@ -7,7 +7,8 @@
     "target_overrides": {
         "*": {
             "platform.stdio-baud-rate" : 115200,
-            "platform.stdio-convert-newlines": true
+            "platform.stdio-convert-newlines": true,
+            "mbed-trace.enable": 1
         },
         "DISCO_L475VG_IOT01A": {
             "target.components_add": [ "QSPIF", "WIFI_ISM43362" ],
@@ -16,8 +17,7 @@
     },
     "macros": [
         "MBED_HEAP_STATS_ENABLED=1",
-        "MBED_MEM_TRACING_ENABLED",
-        "ANOM_AXIS=3",
-        "EI_SENSOR_AQ_STREAM=FILE"
+        "MBEDTLS_RSA_C",
+        "MBED_CONF_TLS_SOCKET_DEBUG_LEVEL=5"
     ]
 }
